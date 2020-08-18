@@ -1,25 +1,40 @@
 use derive_more::{Display, Error};
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
 use sp_api::{ProvideRuntimeApi, TransactionFor};
 use sp_consensus::{
     import_queue::{CacheKeyId, Verifier},
-    BlockCheckParams, BlockImport, BlockImportParams, BlockOrigin, ImportResult,
+    BlockCheckParams, BlockImport, BlockImportParams, BlockOrigin, ForkChoiceStrategy,
+    ImportResult,
 };
 use sp_runtime::{traits::Block as BlockT, Justification};
 
-struct SingletonVerifier;
+#[derive(Default)]
+struct SingletonVerifier<Block>(PhantomData<Block>);
 
-impl<Block> Verifier<Block> for SingletonVerifier
+impl<Block> SingletonVerifier<Block>
+where
+    Block: BlockT,
+{
+    fn check_header(&self, _header: &Block::Header) -> Result<(), String> {
+        // Perform any cheap checks that don't require the parent header to
+        // already be imported. E.g. make sure that the header contains a seal
+        // digest.
+        Ok(())
+    }
+}
+
+impl<Block> Verifier<Block> for SingletonVerifier<Block>
 where
     Block: BlockT,
 {
     fn verify(
         &mut self,
-        _origin: BlockOrigin,
-        _header: Block::Header,
-        _justification: Option<Justification>,
-        _body: Option<Vec<Block::Extrinsic>>,
+        origin: BlockOrigin,
+        header: Block::Header,
+        justification: Option<Justification>,
+        body: Option<Vec<Block::Extrinsic>>,
     ) -> Result<
         (
             BlockImportParams<Block, ()>,
@@ -27,7 +42,16 @@ where
         ),
         String,
     > {
-        Err("unimplemented".into())
+        self.check_header(&header)?;
+
+        let mut import_params = BlockImportParams::new(origin, header);
+
+        import_params.justification = justification;
+        import_params.body = body;
+        import_params.finalized = false;
+        import_params.fork_choice = Some(ForkChoiceStrategy::LongestChain);
+
+        Ok((import_params, None))
     }
 }
 
