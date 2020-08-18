@@ -1,27 +1,64 @@
-use derive_more::{Display, Error};
+use derive_more::{AsRef, From, Into};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
+use codec::{Decode, Encode};
 use sp_api::{ProvideRuntimeApi, TransactionFor};
+use sp_application_crypto::RuntimePublic;
 use sp_consensus::{
     import_queue::{CacheKeyId, Verifier},
-    BlockCheckParams, BlockImport, BlockImportParams, BlockOrigin, ForkChoiceStrategy,
-    ImportResult,
+    BlockCheckParams, BlockImport, BlockImportParams, BlockOrigin, Error as ConsensusError,
+    ForkChoiceStrategy, ImportResult,
 };
-use sp_runtime::{traits::Block as BlockT, Justification};
+use sp_core::sr25519;
+use sp_runtime::{
+    generic::DigestItem,
+    traits::{Block as BlockT, Header as _},
+    ConsensusEngineId, Justification,
+};
 
-#[derive(Default)]
-struct SingletonVerifier<Block>(PhantomData<Block>);
+pub const SINGLETON_ENGINE_ID: ConsensusEngineId = [b's', b'g', b't', b'n'];
+
+#[derive(AsRef, From, Into)]
+struct SingletonBlockAuthority(sr25519::Public);
+
+#[derive(AsRef, Encode, Decode, From)]
+struct SingletonSeal(sr25519::Signature);
+
+impl<Block> From<SingletonSeal> for DigestItem<Block> {
+    fn from(seal: SingletonSeal) -> Self {
+        DigestItem::Seal(SINGLETON_ENGINE_ID, seal.encode())
+    }
+}
+
+struct SingletonVerifier<Block> {
+    authority: SingletonBlockAuthority,
+    _phantom: PhantomData<Block>,
+}
 
 impl<Block> SingletonVerifier<Block>
 where
     Block: BlockT,
 {
-    fn check_header(&self, _header: &Block::Header) -> Result<(), String> {
-        // Perform any cheap checks that don't require the parent header to
-        // already be imported. E.g. make sure that the header contains a seal
-        // digest.
-        Ok(())
+    fn check_header(&self, header: &mut Block::Header) -> Result<SingletonSeal, String> {
+        let seal = match header.digest_mut().pop() {
+            Some(DigestItem::Seal(id, seal)) => {
+                if id == SINGLETON_ENGINE_ID {
+                    SingletonSeal::decode(&mut &seal[..])
+                        .map_err(|_| "Header with invalid seal".to_string())?
+                } else {
+                    return Err("Header seal for wrong engine".into());
+                }
+            }
+            _ => return Err("Unsealed header".into()),
+        };
+
+        let pre_hash = header.hash();
+        if !self.authority.as_ref().verify(&pre_hash, seal.as_ref()) {
+            return Err("Invalid seal signature.".into());
+        }
+
+        Ok(seal)
     }
 }
 
@@ -32,7 +69,7 @@ where
     fn verify(
         &mut self,
         origin: BlockOrigin,
-        header: Block::Header,
+        mut header: Block::Header,
         justification: Option<Justification>,
         body: Option<Vec<Block::Extrinsic>>,
     ) -> Result<
@@ -42,13 +79,18 @@ where
         ),
         String,
     > {
-        self.check_header(&header)?;
+        let hash = header.hash();
+        let seal = self.check_header(&mut header)?;
 
         let mut import_params = BlockImportParams::new(origin, header);
 
-        import_params.justification = justification;
         import_params.body = body;
+        import_params.post_digests.push(seal.into());
+        import_params.post_hash = Some(hash);
+
+        import_params.justification = justification;
         import_params.finalized = false;
+
         import_params.fork_choice = Some(ForkChoiceStrategy::LongestChain);
 
         Ok((import_params, None))
