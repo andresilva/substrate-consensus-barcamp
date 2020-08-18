@@ -6,7 +6,7 @@ use codec::{Decode, Encode};
 use sp_api::{ProvideRuntimeApi, TransactionFor};
 use sp_application_crypto::RuntimePublic;
 use sp_consensus::{
-    import_queue::{CacheKeyId, Verifier},
+    import_queue::{BasicQueue, CacheKeyId, Verifier},
     BlockCheckParams, BlockImport, BlockImportParams, BlockOrigin, Error as ConsensusError,
     ForkChoiceStrategy, ImportResult,
 };
@@ -20,7 +20,7 @@ use sp_runtime::{
 pub const SINGLETON_ENGINE_ID: ConsensusEngineId = [b's', b'g', b't', b'n'];
 
 #[derive(AsRef, From, Into)]
-struct SingletonBlockAuthority(sr25519::Public);
+pub struct SingletonBlockAuthority(sr25519::Public);
 
 #[derive(AsRef, Encode, Decode, From)]
 struct SingletonSeal(sr25519::Signature);
@@ -97,32 +97,62 @@ where
     }
 }
 
-#[derive(Debug, Display, Error)]
-struct SingletonBlockImportError;
 struct SingletonBlockImport<Client> {
-    _client: Client,
+    client: Client,
 }
 
 impl<Block, Client> BlockImport<Block> for SingletonBlockImport<Client>
 where
     Block: BlockT,
-    Client: ProvideRuntimeApi<Block>,
+    Client:
+        BlockImport<Block, Transaction = TransactionFor<Client, Block>> + ProvideRuntimeApi<Block>,
+    Client::Error: Into<ConsensusError>,
 {
-    type Error = SingletonBlockImportError;
+    type Error = ConsensusError;
     type Transaction = TransactionFor<Client, Block>;
 
-    fn check_block(
-        &mut self,
-        _block: BlockCheckParams<Block>,
-    ) -> Result<ImportResult, Self::Error> {
-        Err(SingletonBlockImportError)
+    fn check_block(&mut self, block: BlockCheckParams<Block>) -> Result<ImportResult, Self::Error> {
+        self.client.check_block(block).map_err(Into::into)
     }
 
     fn import_block(
         &mut self,
-        _block: BlockImportParams<Block, Self::Transaction>,
-        _new_cache: HashMap<CacheKeyId, Vec<u8>>,
+        block: BlockImportParams<Block, Self::Transaction>,
+        new_cache: HashMap<CacheKeyId, Vec<u8>>,
     ) -> Result<ImportResult, Self::Error> {
-        Err(SingletonBlockImportError)
+        self.client
+            .import_block(block, new_cache)
+            .map_err(Into::into)
     }
+}
+
+pub struct SingletonConfig {
+    pub block_authority: SingletonBlockAuthority,
+}
+
+pub fn import_queue<Block, Client>(
+    config: SingletonConfig,
+    client: Client,
+    spawner: &impl sp_core::traits::SpawnNamed,
+) -> BasicQueue<Block, TransactionFor<Client, Block>>
+where
+    Block: BlockT,
+    Client: BlockImport<Block, Transaction = TransactionFor<Client, Block>>
+        + ProvideRuntimeApi<Block>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    Client::Error: Into<ConsensusError>,
+{
+    let block_import = Box::new(SingletonBlockImport {
+        client: client.clone(),
+    });
+
+    let verifier = SingletonVerifier {
+        authority: config.block_authority,
+        _phantom: PhantomData,
+    };
+
+    BasicQueue::new(verifier, block_import, None, None, spawner, None)
 }
