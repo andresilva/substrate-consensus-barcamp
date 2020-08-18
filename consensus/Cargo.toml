@@ -1,0 +1,12 @@
+[package]
+name = "consensus"
+version = "0.1.0"
+authors = ["André Silva <andre.beat@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+derive_more = "0.99.0"
+
+sp-api = { version = "2.0.0-rc5", git = "https://github.com/paritytech/substrate.git", tag = "v2.0.0-rc5" }
+sp-consensus = { version = "0.8.0-rc5", git = "https://github.com/paritytech/substrate.git", tag = "v2.0.0-rc5" }
+sp-runtime = { version = "2.0.0-rc5", git = "https://github.com/paritytech/substrate.git", tag = "v2.0.0-rc5" }

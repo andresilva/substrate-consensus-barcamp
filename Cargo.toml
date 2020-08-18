@@ -3,6 +3,7 @@ panic = "unwind"
 
 [workspace]
 members = [
+    "consensus",
     "node",
     "pallets/template",
     "runtime",
