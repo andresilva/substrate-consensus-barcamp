@@ -135,13 +135,14 @@ pub fn new_full(
         None
     };
 
-    if finality_gadget {
+    if finality_gadget || finality_gadget_validator {
         task_manager.spawn_essential_handle().spawn_blocking(
             "singleton-finality-gadget",
             consensus::start_singleton_finality_gadget(
                 singleton_config,
                 finality_gadget_authority_key,
                 client.clone(),
+                network.clone(),
                 network.clone(),
             ),
         );

@@ -303,16 +303,18 @@ pub fn start_singleton_block_author<Block, Client, Inner, Environment, SelectCha
     });
 }
 
-pub async fn start_singleton_finality_gadget<Block, Backend, Client, Network>(
+pub async fn start_singleton_finality_gadget<Block, Backend, Client, Network, SyncOracle>(
     config: SingletonConfig,
     authority_key: Option<SingletonFinalityAuthorityPair>,
     client: Arc<Client>,
     network: Network,
+    mut sync_oracle: SyncOracle,
 ) where
     Block: BlockT,
     Backend: BackendT<Block>,
     Client: BlockchainEvents<Block> + Finalizer<Block, Backend> + Send + Sync,
     Network: GossipNetwork<Block> + Clone + Send + 'static,
+    SyncOracle: SyncOracleT + Send + 'static,
 {
     let topic = <<Block::Header as HeaderT>::Hashing as HashT>::hash("singleton".as_bytes());
 
@@ -329,6 +331,10 @@ pub async fn start_singleton_finality_gadget<Block, Backend, Client, Network>(
             .lock()
             .messages_for(topic)
             .for_each(move |notification| {
+                if sync_oracle.is_major_syncing() {
+                    debug!(target: "singleton", "Ignoring finality notification due to sync.");
+                }
+
                 let message: SingletonFinalityMessage<Block::Hash> = match Decode::decode(
                     &mut &notification.message[..],
                 ) {
