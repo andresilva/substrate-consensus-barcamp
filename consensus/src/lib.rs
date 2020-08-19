@@ -229,7 +229,7 @@ pub fn start_singleton_block_author<Block, Client, Inner, Environment, SelectCha
     SelectChain: SelectChainT<Block> + 'static,
     SyncOracle: SyncOracleT + Send + 'static,
 {
-    const BLOCK_TIME_SECS: u64 = 3;
+    const BLOCK_TIME_SECS: u64 = 10;
 
     let mut propose_block =
         move || -> Result<Proposal<Block, TransactionFor<Client, Block>>, String> {
@@ -378,6 +378,8 @@ pub async fn start_singleton_finality_gadget<Block, Backend, Client, Network, Sy
         client
             .import_notification_stream()
             .for_each(move |notification| {
+                thread::sleep(Duration::from_secs(1));
+
                 if notification.is_new_best {
                     let proof: SingletonFinalityJustification = authority_key
                         .as_ref()
