@@ -51,9 +51,8 @@ pub fn new_full_params(
     );
 
     let singleton_config = consensus::SingletonConfig {
-        block_authority: consensus::SingletonBlockAuthority::from(
-            sp_keyring::sr25519::Keyring::Alice.public(),
-        ),
+        block_authority: sp_keyring::sr25519::Keyring::Alice.public().into(),
+        finality_authority: sp_keyring::sr25519::Keyring::Bob.public().into(),
     };
 
     let import_queue = consensus::import_queue(
@@ -150,9 +149,8 @@ pub fn new_light(config: Configuration) -> Result<TaskManager, ServiceError> {
     );
 
     let singleton_config = consensus::SingletonConfig {
-        block_authority: consensus::SingletonBlockAuthority::from(
-            sp_keyring::sr25519::Keyring::Alice.public(),
-        ),
+        block_authority: sp_keyring::sr25519::Keyring::Alice.public().into(),
+        finality_authority: sp_keyring::sr25519::Keyring::Bob.public().into(),
     };
 
     let import_queue = consensus::import_queue(

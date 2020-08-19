@@ -15,3 +15,7 @@ sp-application-crypto = { version = "2.0.0-rc5", git = "https://github.com/parit
 sp-consensus = { version = "0.8.0-rc5", git = "https://github.com/paritytech/substrate.git", tag = "v2.0.0-rc5" }
 sp-core = { version = "2.0.0-rc5", git = "https://github.com/paritytech/substrate.git", tag = "v2.0.0-rc5" }
 sp-runtime = { version = "2.0.0-rc5", git = "https://github.com/paritytech/substrate.git", tag = "v2.0.0-rc5" }
+
+sc-client-api = { version = "2.0.0-rc5", git = "https://github.com/paritytech/substrate.git", tag = "v2.0.0-rc5" }
+sc-network = { version = "0.8.0-rc5", git = "https://github.com/paritytech/substrate.git", tag = "v2.0.0-rc5" }
+sc-network-gossip = { version = "0.8.0-rc5", git = "https://github.com/paritytech/substrate.git", tag = "v2.0.0-rc5" }

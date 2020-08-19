@@ -6,9 +6,15 @@ use std::time::Duration;
 
 use codec::{Decode, Encode};
 use derive_more::{AsRef, From, Into};
-use log::{debug, warn};
+use futures::{future, StreamExt};
+use log::{debug, info, warn};
 
-use sp_api::{ProvideRuntimeApi, TransactionFor};
+use sc_client_api::{Backend as BackendT, Finalizer};
+use sc_network_gossip::{
+    GossipEngine, Network as GossipNetwork, ValidationResult as GossipValidationResult,
+    Validator as GossipValidator, ValidatorContext as GossipValidatorContext,
+};
+use sp_api::{BlockId, ProvideRuntimeApi, TransactionFor};
 use sp_application_crypto::RuntimePublic;
 use sp_consensus::{
     import_queue::{BasicQueue, CacheKeyId, Verifier},
@@ -19,11 +25,12 @@ use sp_consensus::{
 use sp_core::{sr25519, Pair};
 use sp_runtime::{
     generic::DigestItem,
-    traits::{Block as BlockT, Header as _},
+    traits::{Block as BlockT, Hash as HashT, Header as HeaderT},
     ConsensusEngineId, Justification,
 };
 
-pub const SINGLETON_ENGINE_ID: ConsensusEngineId = [b's', b'g', b't', b'n'];
+pub const SINGLETON_ENGINE_ID: ConsensusEngineId = *b"SGTN";
+pub const SINGLETON_PROTOCOL_NAME: &[u8] = b"/barcamp/singleton/1";
 
 #[derive(AsRef, From, Into)]
 pub struct SingletonBlockAuthority(sr25519::Public);
@@ -31,7 +38,16 @@ pub struct SingletonBlockAuthority(sr25519::Public);
 #[derive(AsRef, From, Into)]
 pub struct SingletonBlockAuthorityPair(sr25519::Pair);
 
-#[derive(AsRef, Encode, Decode, From)]
+#[derive(AsRef, From, Into)]
+pub struct SingletonFinalityAuthority(sr25519::Public);
+
+#[derive(AsRef, From, Into)]
+pub struct SingletonFinalityAuthorityPair(sr25519::Pair);
+
+#[derive(AsRef, Decode, Encode, From)]
+struct SingletonFinalityProof(sr25519::Signature);
+
+#[derive(AsRef, Decode, Encode, From)]
 struct SingletonSeal(sr25519::Signature);
 
 impl<Block> From<SingletonSeal> for DigestItem<Block> {
@@ -138,6 +154,7 @@ where
 
 pub struct SingletonConfig {
     pub block_authority: SingletonBlockAuthority,
+    pub finality_authority: SingletonFinalityAuthority,
 }
 
 pub type SingletonImportQueue<Block, Client> = BasicQueue<Block, TransactionFor<Client, Block>>;
@@ -257,4 +274,81 @@ pub fn start_singleton_block_author<Block, Client, Inner, Environment, SelectCha
             thread::sleep(Duration::from_secs(BLOCK_TIME_SECS));
         }
     });
+}
+
+fn run_singleton_finality_gadget<Block, Backend, Client, Network>(
+    config: SingletonConfig,
+    client: Client,
+    network: Network,
+) where
+    Block: BlockT,
+    Backend: BackendT<Block>,
+    Client: Finalizer<Block, Backend>,
+    Network: GossipNetwork<Block> + Clone + Send + 'static,
+{
+    let topic = <<Block::Header as HeaderT>::Hashing as HashT>::hash("singleton".as_bytes());
+
+    let mut gossip_engine = GossipEngine::new(
+        network,
+        SINGLETON_ENGINE_ID,
+        SINGLETON_PROTOCOL_NAME,
+        Arc::new(AllowAll { topic }),
+    );
+
+    gossip_engine.messages_for(topic).for_each(|notification| {
+        let message: SingletonFinalityMessage<Block::Hash> =
+            match Decode::decode(&mut &notification.message[..]) {
+                Ok(m) => m,
+                Err(err) => {
+                    warn!(target: "singleton", "Failed to decode gossip message: {:?}", err);
+                    return future::ready(());
+                }
+            };
+
+        if let Some(peer) = notification.sender {
+            info!("Got finality message from: {:?}", peer);
+        }
+
+        if config
+            .finality_authority
+            .as_ref()
+            .verify(&message.block_hash, message.proof.as_ref())
+        {
+            if let Err(err) = client.finalize_block(
+                BlockId::Hash(message.block_hash),
+                Some(message.proof.encode()),
+                true,
+            ) {
+                warn!(target: "singleton", "Failed finalizing block {:?}: {:?}",
+                message.block_hash, err);
+            }
+        }
+
+        future::ready(())
+    });
+}
+
+#[derive(Decode, Encode)]
+struct SingletonFinalityMessage<Hash> {
+    block_hash: Hash,
+    proof: SingletonFinalityProof,
+}
+
+/// Allows all gossip messages to get through.
+struct AllowAll<Hash> {
+    topic: Hash,
+}
+
+impl<Block> GossipValidator<Block> for AllowAll<Block::Hash>
+where
+    Block: BlockT,
+{
+    fn validate(
+        &self,
+        _context: &mut dyn GossipValidatorContext<Block>,
+        _sender: &sc_network::PeerId,
+        _data: &[u8],
+    ) -> GossipValidationResult<Block::Hash> {
+        GossipValidationResult::ProcessAndKeep(self.topic)
+    }
 }
