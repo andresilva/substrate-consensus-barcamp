@@ -1,15 +1,11 @@
 use std::collections::HashMap;
-use std::future::Future;
 use std::marker::PhantomData;
+use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use codec::{Decode, Encode};
 use derive_more::{AsRef, From, Into};
-use futures::{
-    future::{self, FutureExt},
-    stream::{self, StreamExt},
-};
-use futures_timer::Delay;
 use log::{debug, warn};
 
 use sp_api::{ProvideRuntimeApi, TransactionFor};
@@ -110,22 +106,23 @@ where
     }
 }
 
-struct SingletonBlockImport<Client> {
-    client: Client,
+struct SingletonBlockImport<Inner, Client> {
+    inner: Inner,
+    _phantom: PhantomData<Client>,
 }
 
-impl<Block, Client> BlockImport<Block> for SingletonBlockImport<Client>
+impl<Block, Inner, Client> BlockImport<Block> for SingletonBlockImport<Inner, Client>
 where
     Block: BlockT,
-    Client:
-        BlockImport<Block, Transaction = TransactionFor<Client, Block>> + ProvideRuntimeApi<Block>,
-    Client::Error: Into<ConsensusError>,
+    Client: ProvideRuntimeApi<Block>,
+    Inner: BlockImport<Block, Transaction = TransactionFor<Client, Block>>,
+    Inner::Error: Into<ConsensusError>,
 {
     type Error = ConsensusError;
     type Transaction = TransactionFor<Client, Block>;
 
     fn check_block(&mut self, block: BlockCheckParams<Block>) -> Result<ImportResult, Self::Error> {
-        self.client.check_block(block).map_err(Into::into)
+        self.inner.check_block(block).map_err(Into::into)
     }
 
     fn import_block(
@@ -133,7 +130,7 @@ where
         block: BlockImportParams<Block, Self::Transaction>,
         new_cache: HashMap<CacheKeyId, Vec<u8>>,
     ) -> Result<ImportResult, Self::Error> {
-        self.client
+        self.inner
             .import_block(block, new_cache)
             .map_err(Into::into)
     }
@@ -143,23 +140,23 @@ pub struct SingletonConfig {
     pub block_authority: SingletonBlockAuthority,
 }
 
-pub fn import_queue<Block, Client>(
+pub type SingletonImportQueue<Block, Client> = BasicQueue<Block, TransactionFor<Client, Block>>;
+
+pub fn import_queue<Block, Inner, Client>(
     config: SingletonConfig,
-    client: Client,
+    inner: Inner,
+    _client: Arc<Client>,
     spawner: &impl sp_core::traits::SpawnNamed,
-) -> BasicQueue<Block, TransactionFor<Client, Block>>
+) -> SingletonImportQueue<Block, Client>
 where
     Block: BlockT,
-    Client: BlockImport<Block, Transaction = TransactionFor<Client, Block>>
-        + ProvideRuntimeApi<Block>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    Client::Error: Into<ConsensusError>,
+    Client: ProvideRuntimeApi<Block> + Send + Sync + 'static,
+    Inner: BlockImport<Block, Transaction = TransactionFor<Client, Block>> + Send + Sync + 'static,
+    Inner::Error: Into<ConsensusError>,
 {
     let block_import = Box::new(SingletonBlockImport {
-        client: client.clone(),
+        inner,
+        _phantom: PhantomData::<Client>,
     });
 
     let verifier = SingletonVerifier {
@@ -170,24 +167,23 @@ where
     BasicQueue::new(verifier, block_import, None, None, spawner, None)
 }
 
-pub fn start_singleton_block_author<Block, Client, Environment, SelectChain, SyncOracle>(
-    _config: SingletonConfig,
+pub fn start_singleton_block_author<Block, Client, Inner, Environment, SelectChain, SyncOracle>(
     authority_key: SingletonBlockAuthorityPair,
-    mut client: Client,
+    mut inner: Inner,
+    _client: Arc<Client>,
     mut environment: Environment,
     select_chain: SelectChain,
     mut sync_oracle: SyncOracle,
-) -> impl Future<Output = ()>
-where
+) where
     Block: BlockT,
-    Client: BlockImport<Block, Transaction = TransactionFor<Client, Block>>
-        + ProvideRuntimeApi<Block>
-        + 'static,
-    Environment: EnvironmentT<Block>,
+    Client: ProvideRuntimeApi<Block> + Send + Sync + 'static,
+    Inner: BlockImport<Block, Transaction = TransactionFor<Client, Block>> + Send + Sync + 'static,
+    Inner::Error: Into<ConsensusError>,
+    Environment: EnvironmentT<Block> + Send + 'static,
     Environment::Proposer: Proposer<Block, Transaction = TransactionFor<Client, Block>>,
     Environment::Error: std::fmt::Debug,
     SelectChain: SelectChainT<Block> + 'static,
-    SyncOracle: SyncOracleT + 'static,
+    SyncOracle: SyncOracleT + Send + 'static,
 {
     const BLOCK_TIME_SECS: u64 = 3;
 
@@ -245,20 +241,19 @@ where
         import_params.storage_changes = Some(proposal.storage_changes);
         import_params.post_hash = Some(post_hash);
 
-        client
+        inner
             .import_block(import_params, HashMap::default())
             .map_err(|err| format!("Failed to import authored block: {:?}", err))
             .map(|_| ())
     };
 
-    let interval_stream = stream::unfold((), |()| {
-        Delay::new(Duration::from_secs(BLOCK_TIME_SECS)).map(|_| Some(((), ())))
-    });
+    thread::spawn(move || {
+        loop {
+            if let Err(err) = author_block() {
+                warn!(target: "singleton", "Failed to author block: {:?}", err);
+            }
 
-    interval_stream.fold((), move |(), ()| {
-        if let Err(err) = author_block() {
-            warn!(target: "singleton", "Failed to author block: {:?}", err);
+            thread::sleep(Duration::from_secs(BLOCK_TIME_SECS));
         }
-        future::ready(())
-    })
+    });
 }
