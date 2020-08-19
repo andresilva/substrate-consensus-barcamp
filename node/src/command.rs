@@ -85,11 +85,12 @@ pub fn run() -> sc_cli::Result<()> {
         }
         None => {
             let runner = cli.create_runner(&cli.run.base)?;
+            let finality_gadget = cli.run.finality_gadget;
             let finality_gadget_validator = cli.run.finality_gadget_validator;
 
             runner.run_node_until_exit(|config| match config.role {
                 Role::Light => service::new_light(config),
-                _ => service::new_full(config, finality_gadget_validator),
+                _ => service::new_full(config, finality_gadget, finality_gadget_validator),
             })
         }
     }

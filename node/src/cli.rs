@@ -8,6 +8,9 @@ pub struct RunCmd {
     #[structopt(flatten)]
     pub base: sc_cli::RunCmd,
 
+    #[structopt(long = "finality-gadget")]
+    pub finality_gadget: bool,
+
     #[structopt(long = "finality-gadget-validator")]
     pub finality_gadget_validator: bool,
 }

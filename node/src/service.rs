@@ -85,6 +85,7 @@ pub fn new_full_params(
 /// Builds a new service for a full client.
 pub fn new_full(
     config: Configuration,
+    finality_gadget: bool,
     finality_gadget_validator: bool,
 ) -> Result<TaskManager, ServiceError> {
     let (params, singleton_config, select_chain) = new_full_params(config)?;
@@ -134,15 +135,17 @@ pub fn new_full(
         None
     };
 
-    task_manager.spawn_essential_handle().spawn_blocking(
-        "singleton-finality-gadget",
-        consensus::start_singleton_finality_gadget(
-            singleton_config,
-            finality_gadget_authority_key,
-            client.clone(),
-            network.clone(),
-        ),
-    );
+    if finality_gadget {
+        task_manager.spawn_essential_handle().spawn_blocking(
+            "singleton-finality-gadget",
+            consensus::start_singleton_finality_gadget(
+                singleton_config,
+                finality_gadget_authority_key,
+                client.clone(),
+                network.clone(),
+            ),
+        );
+    }
 
     Ok(task_manager)
 }
