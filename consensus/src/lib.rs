@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use codec::{Decode, Encode};
 use derive_more::{AsRef, From, Into};
-use futures::{future, StreamExt};
+use futures::{future, FutureExt, StreamExt};
 use log::{debug, info, warn};
+use parking_lot::Mutex;
 
-use sc_client_api::{Backend as BackendT, Finalizer};
+use sc_client_api::{Backend as BackendT, BlockchainEvents, Finalizer};
 use sc_network_gossip::{
     GossipEngine, Network as GossipNetwork, ValidationResult as GossipValidationResult,
     Validator as GossipValidator, ValidatorContext as GossipValidatorContext,
@@ -32,13 +33,13 @@ use sp_runtime::{
 pub const SINGLETON_ENGINE_ID: ConsensusEngineId = *b"SGTN";
 pub const SINGLETON_PROTOCOL_NAME: &[u8] = b"/barcamp/singleton/1";
 
-#[derive(AsRef, From, Into)]
+#[derive(AsRef, Clone, From, Into)]
 pub struct SingletonBlockAuthority(sr25519::Public);
 
 #[derive(AsRef, From, Into)]
 pub struct SingletonBlockAuthorityPair(sr25519::Pair);
 
-#[derive(AsRef, From, Into)]
+#[derive(AsRef, Clone, From, Into)]
 pub struct SingletonFinalityAuthority(sr25519::Public);
 
 #[derive(AsRef, From, Into)]
@@ -152,6 +153,7 @@ where
     }
 }
 
+#[derive(Clone)]
 pub struct SingletonConfig {
     pub block_authority: SingletonBlockAuthority,
     pub finality_authority: SingletonFinalityAuthority,
@@ -276,56 +278,123 @@ pub fn start_singleton_block_author<Block, Client, Inner, Environment, SelectCha
     });
 }
 
-fn run_singleton_finality_gadget<Block, Backend, Client, Network>(
+pub async fn start_singleton_finality_gadget<Block, Backend, Client, Network>(
     config: SingletonConfig,
-    client: Client,
+    authority_key: Option<SingletonFinalityAuthorityPair>,
+    client: Arc<Client>,
     network: Network,
 ) where
     Block: BlockT,
     Backend: BackendT<Block>,
-    Client: Finalizer<Block, Backend>,
+    Client: BlockchainEvents<Block> + Finalizer<Block, Backend> + Send + Sync,
     Network: GossipNetwork<Block> + Clone + Send + 'static,
 {
     let topic = <<Block::Header as HeaderT>::Hashing as HashT>::hash("singleton".as_bytes());
 
-    let mut gossip_engine = GossipEngine::new(
+    let gossip_engine = Arc::new(Mutex::new(GossipEngine::new(
         network,
         SINGLETON_ENGINE_ID,
         SINGLETON_PROTOCOL_NAME,
         Arc::new(AllowAll { topic }),
-    );
+    )));
 
-    gossip_engine.messages_for(topic).for_each(|notification| {
-        let message: SingletonFinalityMessage<Block::Hash> =
-            match Decode::decode(&mut &notification.message[..]) {
-                Ok(m) => m,
-                Err(err) => {
-                    warn!(target: "singleton", "Failed to decode gossip message: {:?}", err);
-                    return future::ready(());
+    let mut listener = {
+        let client = client.clone();
+        gossip_engine
+            .lock()
+            .messages_for(topic)
+            .for_each(move |notification| {
+                let message: SingletonFinalityMessage<Block::Hash> = match Decode::decode(
+                    &mut &notification.message[..],
+                ) {
+                    Ok(m) => m,
+                    Err(err) => {
+                        warn!(target: "singleton", "Failed to decode gossip message: {:?}", err);
+                        return future::ready(());
+                    }
+                };
+
+                if let Some(peer) = notification.sender {
+                    info!("Got finality message from: {:?}", peer);
                 }
-            };
 
-        if let Some(peer) = notification.sender {
-            info!("Got finality message from: {:?}", peer);
-        }
+                if config
+                    .finality_authority
+                    .as_ref()
+                    .verify(&message.block_hash, message.proof.as_ref())
+                {
+                    if let Err(err) = client.finalize_block(
+                        BlockId::Hash(message.block_hash),
+                        Some(message.proof.encode()),
+                        true,
+                    ) {
+                        warn!(target: "singleton", "Failed finalizing block {:?}: {:?}",
+                            message.block_hash,
+                            err
+                        );
+                    }
+                } else {
+                    warn!(target: "singleton", "Failed verifying finality proof");
+                }
 
-        if config
-            .finality_authority
-            .as_ref()
-            .verify(&message.block_hash, message.proof.as_ref())
-        {
-            if let Err(err) = client.finalize_block(
-                BlockId::Hash(message.block_hash),
-                Some(message.proof.encode()),
-                true,
-            ) {
-                warn!(target: "singleton", "Failed finalizing block {:?}: {:?}",
-                message.block_hash, err);
-            }
-        }
+                future::ready(())
+            })
+    };
 
-        future::ready(())
-    });
+    let finality_authority = |authority_key: SingletonFinalityAuthorityPair| {
+        let gossip_engine = gossip_engine.clone();
+
+        client
+            .import_notification_stream()
+            .for_each(move |notification| {
+                if notification.is_new_best {
+                    let proof: SingletonFinalityProof = authority_key
+                        .as_ref()
+                        .sign(notification.hash.as_ref())
+                        .into();
+
+                    let proof_encoded = proof.encode();
+
+                    // let proof_encoded = proof.encode();
+                    let message = SingletonFinalityMessage {
+                        block_hash: notification.hash,
+                        proof,
+                    };
+
+                    gossip_engine
+                        .lock()
+                        .gossip_message(topic, message.encode(), true);
+
+                    if let Err(err) = client.finalize_block(
+                        BlockId::Hash(notification.hash),
+                        Some(proof_encoded),
+                        true,
+                    ) {
+                        warn!(target: "singleton", "Failed finalizing block {:?}: {:?}",
+                            notification.hash,
+                            err
+                        );
+                    }
+                }
+
+                future::ready(())
+            })
+    };
+
+    let mut producer = if let Some(authority_key) = authority_key {
+        finality_authority(authority_key).boxed()
+    } else {
+        future::pending::<()>().boxed()
+    }
+    .fuse();
+
+    let mut gossip_engine = future::poll_fn(move |cx| gossip_engine.lock().poll_unpin(cx)).fuse();
+
+    futures::select! {
+        () = gossip_engine => {},
+        () = listener => {},
+        () = producer => {},
+    }
 }
 
 #[derive(Decode, Encode)]
