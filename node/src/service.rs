@@ -30,6 +30,7 @@ pub fn new_full_params(
             (),
             FullBackend,
         >,
+        consensus::SingletonConfig,
         FullSelectChain,
     ),
     ServiceError,
@@ -56,7 +57,7 @@ pub fn new_full_params(
     };
 
     let import_queue = consensus::import_queue(
-        singleton_config,
+        singleton_config.clone(),
         client.clone(),
         client.clone(),
         &task_manager.spawn_handle(),
@@ -78,14 +79,17 @@ pub fn new_full_params(
         rpc_extensions_builder: Box::new(|_| ()),
     };
 
-    Ok((params, select_chain))
+    Ok((params, singleton_config, select_chain))
 }
 
 /// Builds a new service for a full client.
-pub fn new_full(config: Configuration) -> Result<TaskManager, ServiceError> {
-    let (params, select_chain) = new_full_params(config)?;
+pub fn new_full(
+    config: Configuration,
+    finality_gadget_validator: bool,
+) -> Result<TaskManager, ServiceError> {
+    let (params, singleton_config, select_chain) = new_full_params(config)?;
 
-    let (role, enable_finality_gadget, prometheus_registry, client, transaction_pool) = {
+    let (role, prometheus_registry, client, transaction_pool) = {
         let sc_service::ServiceParams {
             config,
             client,
@@ -95,7 +99,6 @@ pub fn new_full(config: Configuration) -> Result<TaskManager, ServiceError> {
 
         (
             config.role.clone(),
-            !config.disable_grandpa,
             config.prometheus_registry().cloned(),
             client.clone(),
             transaction_pool.clone(),
@@ -116,9 +119,7 @@ pub fn new_full(config: Configuration) -> Result<TaskManager, ServiceError> {
         );
 
         consensus::start_singleton_block_author(
-            consensus::SingletonBlockAuthorityPair::from(
-                sp_keyring::sr25519::Keyring::Alice.pair(),
-            ),
+            sp_keyring::sr25519::Keyring::Alice.pair().into(),
             client.clone(),
             client.clone(),
             proposer,
@@ -127,7 +128,21 @@ pub fn new_full(config: Configuration) -> Result<TaskManager, ServiceError> {
         );
     }
 
-    if enable_finality_gadget {}
+    let finality_gadget_authority_key = if finality_gadget_validator {
+        Some(sp_keyring::sr25519::Keyring::Bob.pair().into())
+    } else {
+        None
+    };
+
+    task_manager.spawn_essential_handle().spawn_blocking(
+        "singleton-finality-gadget",
+        consensus::start_singleton_finality_gadget(
+            singleton_config,
+            finality_gadget_authority_key,
+            client.clone(),
+            network.clone(),
+        ),
+    );
 
     Ok(task_manager)
 }
