@@ -46,7 +46,7 @@ pub struct SingletonFinalityAuthority(sr25519::Public);
 pub struct SingletonFinalityAuthorityPair(sr25519::Pair);
 
 #[derive(AsRef, Decode, Encode, From)]
-struct SingletonFinalityProof(sr25519::Signature);
+struct SingletonFinalityJustification(sr25519::Signature);
 
 #[derive(AsRef, Decode, Encode, From)]
 struct SingletonSeal(sr25519::Signature);
@@ -125,6 +125,7 @@ where
 
 struct SingletonBlockImport<Inner, Client> {
     inner: Inner,
+    finality_authority: SingletonFinalityAuthority,
     _phantom: PhantomData<Client>,
 }
 
@@ -144,9 +145,32 @@ where
 
     fn import_block(
         &mut self,
-        block: BlockImportParams<Block, Self::Transaction>,
+        mut block: BlockImportParams<Block, Self::Transaction>,
         new_cache: HashMap<CacheKeyId, Vec<u8>>,
     ) -> Result<ImportResult, Self::Error> {
+        let justification = block
+            .justification
+            .take()
+            .and_then(|j| SingletonFinalityJustification::decode(&mut &j[..]).ok());
+
+        if let Some(justification) = justification {
+            let hash = block
+                .post_hash
+                .as_ref()
+                .expect("header has seal; must have post hash; qed.");
+
+            if self
+                .finality_authority
+                .as_ref()
+                .verify(hash, justification.as_ref())
+            {
+                block.justification = Some(justification.encode());
+                block.finalized = true;
+            } else {
+                warn!(target: "singleton", "Invalid justification provided with block: {:?}", hash)
+            }
+        }
+
         self.inner
             .import_block(block, new_cache)
             .map_err(Into::into)
@@ -175,6 +199,7 @@ where
 {
     let block_import = Box::new(SingletonBlockImport {
         inner,
+        finality_authority: config.finality_authority,
         _phantom: PhantomData::<Client>,
     });
 
@@ -348,7 +373,7 @@ pub async fn start_singleton_finality_gadget<Block, Backend, Client, Network>(
             .import_notification_stream()
             .for_each(move |notification| {
                 if notification.is_new_best {
-                    let proof: SingletonFinalityProof = authority_key
+                    let proof: SingletonFinalityJustification = authority_key
                         .as_ref()
                         .sign(notification.hash.as_ref())
                         .into();
@@ -400,7 +425,7 @@ pub async fn start_singleton_finality_gadget<Block, Backend, Client, Network>(
 #[derive(Decode, Encode)]
 struct SingletonFinalityMessage<Hash> {
     block_hash: Hash,
-    proof: SingletonFinalityProof,
+    proof: SingletonFinalityJustification,
 }
 
 /// Allows all gossip messages to get through.
