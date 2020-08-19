@@ -146,6 +146,13 @@ pub fn new_full(
                 network.clone(),
             ),
         );
+    } else {
+        // register the notification protocol so that we
+        // don't get warnings about unknown protocol messages
+        network.register_notifications_protocol(
+            consensus::SINGLETON_ENGINE_ID,
+            std::borrow::Cow::from(consensus::SINGLETON_PROTOCOL_NAME),
+        );
     }
 
     Ok(task_manager)
