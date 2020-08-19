@@ -240,6 +240,7 @@ pub fn start_singleton_block_author<Block, Client, Inner, Environment, SelectCha
         import_params.body = Some(body);
         import_params.storage_changes = Some(proposal.storage_changes);
         import_params.post_hash = Some(post_hash);
+        import_params.fork_choice = Some(ForkChoiceStrategy::LongestChain);
 
         inner
             .import_block(import_params, HashMap::default())
